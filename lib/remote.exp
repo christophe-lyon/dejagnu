@@ -59,7 +59,7 @@ proc remote_raw_open { args } {
 # Close a spawn ID, and wait for the process to die.  If PID is not
 # -1, then the process is killed if it doesn't exit gracefully.
 #
-proc close_wait_program { program_id pid {wres_varname ""} } {
+proc close_wait_program { program_id pid trace {wres_varname ""} } {
     if {$wres_varname != "" } {
 	upvar 1 $wres_varname wres
     }
@@ -76,6 +76,9 @@ proc close_wait_program { program_id pid {wres_varname ""} } {
 	# Send SIGINT to give the program a better chance to interrupt
 	# whatever it might be doing and react to stdin closing.
 	# eg, in case of GDB, this should get it back to the prompt.
+	if { $trace > 0 } {
+	    puts "CLYON:[pid] close_wait_program pid:$pid pgid:$pgid, now killing -2"
+	}
 	exec sh -c "exec > /dev/null 2>&1 && (kill -2 $pgid || kill -2 $pid)"
 
 	# If the program doesn't exit gracefully when stdin closes,
@@ -90,6 +93,11 @@ proc close_wait_program { program_id pid {wres_varname ""} } {
 	append sh_cmd " && sleep $secs && (kill -9 $pgid || kill -9 $pid)"
 	append sh_cmd " && sleep $secs"
 	set exec_pid [exec sh -c "$sh_cmd" &]
+	if { $trace > 0 } {
+	    puts "CLYON:[pid] close_wait_program exec_pid:$exec_pid sh_cmd:$sh_cmd"
+	    exec sh -c "ps aguxwww | grep $pid"
+	    exec sh -c "ps aguxwww | grep $exec_pid"
+	}
     }
     verbose "pid is $pid"
 
@@ -104,6 +112,11 @@ proc close_wait_program { program_id pid {wres_varname ""} } {
 	# We reaped the process, so cancel the pending force-kills, as
 	# otherwise if the PID is reused for some other unrelated
 	# process, we'd kill the wrong process.
+	if { $trace > 0 } {
+	    puts "CLYON:[pid] close_wait_program cancel force-kills exec_pid:$exec_pid"
+	    exec sh -c "ps aguxwww | grep $pid"
+	    exec sh -c "ps aguxwww | grep $exec_pid"
+	}
 	exec sh -c "exec > /dev/null 2>&1 && kill -9 $exec_pid"
     }
 
@@ -156,6 +169,7 @@ proc local_exec { commandline inp outp timeout } {
 	    set pid 0
 	    set result2 5
 	}
+##	puts "CLYON:[pid] local_exec $commandline result=$result, result2=$result2"
     } else {
 	# Use a command pipeline with open.
 	if { $inp != "" } {
@@ -194,6 +208,7 @@ proc local_exec { commandline inp outp timeout } {
     # kill.
     set pgid "-[join $pid { -}]"
     verbose "pid is $pid $pgid"
+    #0 puts "CLYON:[pid] local_exec pid:$pid pgid:$pgid id:$id result:$result result2:$result2 commandline:$commandline"
     if { $result != 0 || $result2 != 0 } {
 	# This shouldn't happen.
 	if {[info exists errorInfo]} {
@@ -202,6 +217,7 @@ proc local_exec { commandline inp outp timeout } {
 	    set foo ""
 	}
 	verbose "spawn -open $id failed, $result $result2, $foo"
+##	puts "CLYON:[pid] local_exec spawn -open $id failed, $result $result2, $foo"
 	catch "close $id"
 	return [list -1 "spawn failed"]
     }
@@ -211,13 +227,18 @@ proc local_exec { commandline inp outp timeout } {
 
     # Wait for either $timeout seconds to elapse, or for the program to
     # exit.
+    # CLYON:
+    set trace 0
     expect {
 	-i $spawn_id -timeout $timeout -re ".+" {
 	    append output $expect_out(buffer)
 	    exp_continue -continue_timer
 	}
 	timeout {
+	    puts "CLYON:[pid] local_exec program timed out"
+	    append output "(TIMED OUT)"
 	    warning "program timed out"
+	    set trace 1
 	}
 	eof {
 	    set got_eof 1
@@ -227,17 +248,25 @@ proc local_exec { commandline inp outp timeout } {
     # If we didn't get EOF, we have to kill the poor defenseless program.
     if { $got_eof } {
 	set pid -1
+##	puts "CLYON:[pid] local_exec got_eof, pid now -1"
+    } else {
+	puts "CLYON:[pid] local_exec did not got_eof"
     }
-    set r2 [close_wait_program $spawn_id $pid wres]
+    set r2 [close_wait_program $spawn_id $pid $trace wres]
+##    puts "CLYON:[pid] local_exec after close_wait_program $pid, r2=$r2, id=$id"
     if { $id > 0 } {
 	set r2 [catch "close $id" res]
     } else {
 	verbose "waitres is $wres" 2
+	#0 puts "CLYON:[pid] local_exec $commandline"
+	#0 puts "CLYON:[pid] local_exec waitres is $wres, r2=$r2"
 	if { $r2 == 0 } {
 	    set r2 [lindex $wres 3]
+	    #0 puts "CLYON:[pid] local_exec r2 from wres=$r2"
 	    if { [llength $wres] > 4 } {
 		if { [lindex $wres 4] == "CHILDKILLED" } {
 		    set r2 1
+		    append output "(KILLED)"
 		}
 	    }
 	    if { $r2 != 0 } {
@@ -251,11 +280,13 @@ proc local_exec { commandline inp outp timeout } {
     }
     if { $r2 != 0 || $res != "" || ! $got_eof } {
 	verbose "close result is $res"
+	#0 puts "CLYON:[pid] local_exec close result is $res"
 	set status 1
     } else {
 	set status 0
     }
     verbose "output is $output status $status"
+##    puts "CLYON:[pid] local_exec output is $output status $status"
     if { $outp == "" || $outp == "|& cat" } {
 	return [list $status $output]
     } else {
@@ -310,6 +341,7 @@ proc remote_exec { hostname program args } {
 
     # Run it locally if appropriate.
     if { ![is_remote $hostname] } {
+##    	puts "CLYON:[pid] remote_exec calling local_exec $program $pargs"
 	set result [local_exec "$program $pargs" $inp $outp $timeout]
     } else {
         if { [board_info $hostname exists remotedir] } {
@@ -329,6 +361,7 @@ proc remote_exec { hostname program args } {
 }
 
 proc standard_exec { hostname args } {
+##    puts "CLYON:[pid] standard_exec calling rsh_exec $hostname $args"
     return [eval rsh_exec \"$hostname\" $args]
 }
 
@@ -364,15 +397,18 @@ proc standard_close { host } {
 	    unset board_info(${host},fileid_origid)
 	} else {
 	    set result [catch "exp_pid -i $shell_id" pid]
+##            puts "CLYON:[pid] standard_close result: $result"
 	    if { $result != 0 || $pid <= 0 } {
 		set result [catch "pid $shell_id" pid]
+##                puts "CLYON:[pid] standard_close result bis: $result"
 		if { $result != 0 } {
 		    set pid -1
 		}
 	    }
 	}
 
-	close_wait_program $shell_id $pid
+	#CLYON added 0
+	close_wait_program $shell_id $pid 0
 
 	if {[info exists oid]} {
 	    catch "close $oid"
@@ -603,13 +639,16 @@ proc call_remote { type proc dest args } {
     }
 
     verbose "call_remote $type $proc $dest $args " 3
+##    puts "CLYON:[pid] call_remote $type $proc $dest $args "
     # Close has to be handled specially.
     if { $proc == "close" || $proc == "open" } {
 	foreach try "$high_prot [board_info $dest connect] telnet standard" {
 	    if { $try != "" } {
 		if { [info procs "${try}_${proc}"] != "" } {
 		    verbose "call_remote calling ${try}_${proc}" 3
+##		    puts "CLYON:[pid] call_remote calling1 ${try}_${proc} $dest $args"
 		    set result [eval ${try}_${proc} \"$dest\" $args]
+##		    puts "CLYON:[pid] call_remote called1 ${try}_${proc} $dest $args, result: $result"
 		    break
 		}
 	    }
@@ -617,13 +656,17 @@ proc call_remote { type proc dest args } {
 	set ft "[board_info $dest file_transfer]"
 	if { [info procs "${ft}_${proc}"] != "" } {
 	    verbose "calling ${ft}_${proc} $dest $args" 3
+##	    puts "CLYON:[pid] calling2 ${ft}_${proc} $dest $args"
 	    set result2 [eval ${ft}_${proc} \"$dest\" $args]
+##	    puts "CLYON:[pid] called2 ${ft}_${proc} $dest $args, result2: $result2"
 	}
 	if {![info exists result]} {
 	    if {[info exists result2]} {
 		set result $result2
+##		puts "CLYON:[pid] call_remote set result to result2: $result"
 	    } else {
 		set result ""
+##		puts "CLYON:[pid] call_remote clear result"
 	    }
 	}
 	return $result
@@ -633,6 +676,7 @@ proc call_remote { type proc dest args } {
 	if { $try != "" } {
 	    if { [info procs "${try}_${proc}"] != "" } {
 		verbose "call_remote calling ${try}_${proc}" 3
+##		puts "CLYON:[pid] call_remote calling3 ${try}_${proc} \"$dest\" $args"
 		return [eval ${try}_${proc} \"$dest\" $args]
 	    }
 	}
@@ -1068,6 +1112,7 @@ proc standard_load { dest prog args } {
 	return "untested"
     }
 
+##    puts "CLYON:[pid] standard_load dest $dest prog $prog args $args"
     if {[is_remote $dest]} {
         if {![board_info $dest exists remotedir]} {
             set board_info($dest,remotedir) "/tmp/runtest.[pid]"
@@ -1085,9 +1130,11 @@ proc standard_load { dest prog args } {
 		return "unresolved"
 	    }
 	}
+##	puts "CLYON:[pid] standard_load calling remote_exec dest $dest remotefile $remotefile pargs $pargs"
 	set status [remote_exec $dest $remotefile $pargs $inp]
 	remote_file $dest delete $remotefile
     } else {
+##	puts "CLYON:[pid] standard_load calling remote_exec dest $dest prog $prog pargs $pargs"
 	set status [remote_exec $dest $prog $pargs $inp]
     }
     if { [lindex $status 0] < 0 } {
@@ -1147,6 +1194,8 @@ proc standard_wait { dest timeout } {
 	    exp_continue -continue_timer
 	}
 	timeout {
+	    puts "CLYON:[pid] standard_wait program timed out"
+	    append output "(TIMED OUT)"
 	    warning "program timed out."
 	}
 	eof {
@@ -1172,14 +1221,22 @@ proc standard_wait { dest timeout } {
 		} else {
 		    set status 0
 		}
+##		puts "CLYON:[pid] standard_wait dest $dest timeout $timeout r2: $r2, res: $res, status: $status"
 	    } else {
 		set s [wait -i [board_info $dest fileid]]
+##		puts "CLYON:[pid] standard_wait dest $dest timeout $timeout s $s"
 		if { [lindex $s 0] != 0 && [lindex $s 2] == 0 } {
 		    set status [lindex $s 3]
 		    if { [llength $s] > 4 } {
 			if { [lindex $s 4] == "CHILDKILLED" } {
 			    set status 1
+			    append output "(KILLED)"
 			}
+		    } elseif { $status == 137 } {
+			append output "(KILLED)"
+			puts "CLYON:[pid] output is now $output"
+		    } elseif { $status == 124 } {
+			append output "(TIMED OUT)"
 		    }
 		}
 	    }
@@ -1187,6 +1244,7 @@ proc standard_wait { dest timeout } {
     }
 
     remote_close $dest
+##    puts "CLYON:[pid] standard_wait status: $status, output: $output"
     return [list $status $output]
 }
 

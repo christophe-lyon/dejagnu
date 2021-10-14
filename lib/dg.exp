@@ -698,6 +698,7 @@ proc dg-test { args } {
     set comp_output [lindex $results 0]
     set output_file [lindex $results 1]
 
+    #0 puts "CLYON:[pid] dg-test comp_output:$comp_output"
     foreach i ${dg-messages} {
 	verbose "Scanning for message: $i" 4
 
@@ -748,8 +749,17 @@ proc dg-test { args } {
 	}
     }
 
+    #0 puts "CLYON:[pid] dg-test comp_output before pruning:$comp_output"
     # Remove messages from the tool that we can ignore.
     set comp_output [prune_warnings $comp_output]
+
+    # CLYON
+    if {[string match "*(KILLED)*" $comp_output]} {
+	untested "$name: $comp_output"
+    }
+    if {[string match "*(TIMED OUT)*" $comp_output]} {
+	untested "$name: $comp_output"
+    }
 
     if { [info procs ${tool}-dg-prune] != "" } {
 	set comp_output [${tool}-dg-prune $target_triplet $comp_output]
@@ -799,9 +809,11 @@ proc dg-test { args } {
 	    unresolved "$name compilation failed to produce executable"
 	} else {
 	    set status -1
+##	    puts "CLYON:[pid] dg-test before tool: ${tool}_load output_file: $output_file"
 	    set result [${tool}_load $output_file]
 	    set status [lindex $result 0]
 	    set output [lindex $result 1]
+##	    puts "CLYON:[pid] dg-test status=$status, output=$output"
 	    if { [lindex ${dg-do-what} 2] == "F" } {
 		setup_xfail "*-*-*"
 	    }
@@ -814,8 +826,20 @@ proc dg-test { args } {
 		    }
 		    set texttmp [lindex ${dg-output-text} 1]
 		    if { ![regexp -- $texttmp ${output}] } {
-			fail "$name output pattern test"
-			send_log "Output was:\n${output}\nShould match:\n$texttmp\n"
+			if {[info exists errorCode]} {
+			    verbose "Exec failed, errorCode: $errorCode" 3
+			    if {[string match "*interrupted system call*" $errorCode]} {
+				fail "$name output pattern test (interrupted system call)"
+				send_log "$name output pattern test ($errorCode)\n"
+			    } else {
+				fail "$name output pattern test"
+				send_log "Output was:\n${output}\nShould match:\n$texttmp\n(reason: $errorCode)\n"
+			    }
+			} else {
+			    verbose "Exec failed, errorCode not defined!" 3
+			    fail "$name output pattern test"
+			    send_log "Output was:\n${output}\nShould match:\n$texttmp\n(reason: error code not defined)\n"
+			}
 			verbose "Failed test for output pattern $texttmp" 3
 		    } else {
 			pass "$name output pattern test"
@@ -824,15 +848,45 @@ proc dg-test { args } {
 		    unset texttmp
 		}
 	    } elseif { "$status" == "fail" } {
+		# CLYON
+		if {[string match "*(KILLED)*" $output]} {
+		    untested "$name: $output"
+		} elseif {[string match "*(TIMED OUT)*" $output]} {
+		    untested "$name: $output"
+		} elseif {[info exists errorCode]} {
 		# It would be nice to get some info out of errorCode.
-		if {[info exists errorCode]} {
 		    verbose "Exec failed, errorCode: $errorCode" 3
+#		    puts "CLYON:[pid] dg-test Exec failed, errorCode: $errorCode"
+		    if {[string match "*interrupted system call*" $errorCode]} {
+#			puts "CLYON:[pid] dg-test Exec failed, errorCode: $errorCode"
+			send_log "$name execution test ($errorCode)\n"
+			fail "$name execution test (interrupted system call)"
+		    } else {
+#			puts "CLYON:[pid] dg-test Exec failed, errorCode: $errorCode"
+			send_log "$name execution test (reason: $errorCode)\n"
+			fail "$name execution test"
+		    }
 		} else {
 		    verbose "Exec failed, errorCode not defined!" 3
+#		    puts "CLYON:[pid] dg-test Exec failed, errorCode not defined"
+		    send_log "$name execution test (error code not defined)\n"
+		    fail "$name execution test"
 		}
-		fail "$name execution test"
+#		fail "$name execution test"
 	    } else {
-		$status "$name execution test"
+		# If there was an error, provide some info in the logs
+		if {[info exists errorCode]} {
+		    send_log "$name execution test ($errorCode, ${output})\n"
+		    if { [lindex $errorCode 2] == 124 } {
+			$status "$name execution test (Killed, timed out)"
+		    } elseif { [lindex $errorCode 2] == 137 } {
+			$status "$name execution test (Killed)"
+		    } else {
+			$status "$name execution test ($errorCode)"
+		    }
+		} else {
+		    $status "$name execution test"
+		}
 	    }
 	}
     }
